@@ -22,8 +22,6 @@
     "ingest:holidays": "node --experimental-strip-types scripts/ingestHolidays.ts"
   },
   "dependencies": {
-    "@next/swc-wasm-nodejs": "^16.4.5",
-    "@next/swc-win32-x64-msvc": "^14.2.15",
     "clsx": "^2.1.1",
     "lucide-react": "^0.453.0",
     "next": "14.2.15",
