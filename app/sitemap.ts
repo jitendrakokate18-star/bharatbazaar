@@ -1,7 +1,7 @@
 import { MetadataRoute } from 'next';
-import { getDb } from '@/lib/db';
+import { prisma } from '@/lib/prisma';
 
-export default function sitemap(): MetadataRoute.Sitemap {
+export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://bharatiyabajar.in';
 
   const staticRoutes: MetadataRoute.Sitemap = [
@@ -13,16 +13,21 @@ export default function sitemap(): MetadataRoute.Sitemap {
   ];
 
   try {
-    const db = getDb();
-    const companies = db.prepare('SELECT isin, updated_at FROM company WHERE status = "ACTIVE" LIMIT 500').all() as any[];
+    const companies = await prisma.company.findMany({
+      where: { status: 'ACTIVE' },
+      select: { isin: true, updatedAt: true },
+      take: 500,
+    });
     const companyRoutes: MetadataRoute.Sitemap = companies.map((c) => ({
       url: `${baseUrl}/company/${c.isin}`,
-      lastModified: c.updated_at ? new Date(c.updated_at) : new Date(),
+      lastModified: c.updatedAt ? new Date(c.updatedAt) : new Date(),
       changeFrequency: 'daily',
       priority: 0.7,
     }));
 
-    const sectors = db.prepare('SELECT slug FROM sector_taxonomy').all() as any[];
+    const sectors = await prisma.sectorTaxonomy.findMany({
+      select: { slug: true },
+    });
     const sectorRoutes: MetadataRoute.Sitemap = sectors.map((s) => ({
       url: `${baseUrl}/sectors/${s.slug}`,
       lastModified: new Date(),

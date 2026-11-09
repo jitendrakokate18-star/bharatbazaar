@@ -1,4 +1,4 @@
-import { getDb } from '../lib/db.ts';
+import { prisma } from '../lib/prisma.ts';
 
 interface IndexMeta {
   symbol: string;
@@ -14,39 +14,7 @@ const INDICES: IndexMeta[] = [
 ];
 
 export async function ingestIndices(fetchHistory = true) {
-  const db = getDb();
-  console.log('Ingesting real live quotes and 5-year history for Indian Benchmark Indices...');
-
-  const insertQuote = db.prepare(`
-    INSERT INTO index_quote (
-      symbol, name, name_mr, ltp, change, change_pct, high, low, prev_close,
-      quote_time, as_of, source, delayed
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-    ON CONFLICT(symbol) DO UPDATE SET
-      ltp = excluded.ltp,
-      change = excluded.change,
-      change_pct = excluded.change_pct,
-      high = excluded.high,
-      low = excluded.low,
-      prev_close = excluded.prev_close,
-      quote_time = excluded.quote_time,
-      as_of = excluded.as_of,
-      source = excluded.source
-  `);
-
-  const insertHistory = db.prepare(`
-    INSERT INTO index_history (id, symbol, date, open, high, low, close, adj_close, volume, as_of, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(symbol, date) DO UPDATE SET
-      open = excluded.open,
-      high = excluded.high,
-      low = excluded.low,
-      close = excluded.close,
-      adj_close = excluded.adj_close,
-      volume = excluded.volume,
-      as_of = excluded.as_of,
-      source = excluded.source
-  `);
+  console.log('Ingesting real live quotes and 5-year history for Indian Benchmark Indices into PostgreSQL...');
 
   for (const idx of INDICES) {
     try {
@@ -81,28 +49,12 @@ export async function ingestIndices(fetchHistory = true) {
       const asOf = quoteTime;
 
       // Upsert Quote
-      insertQuote.run(
-        idx.symbol,
-        idx.name,
-        idx.nameMr,
-        ltp,
-        change,
-        changePct,
-        high,
-        low,
-        prevClose,
-        quoteTime,
-        asOf,
-        'Yahoo Finance (Exchange Feed)'
-      );
-
-      // Also upsert short alias key like SENSEX and NIFTY50 so legacy lookups succeed
-      const shortSymbol = idx.symbol === '^BSESN' ? 'SENSEX' : idx.symbol === '^NSEI' ? 'NIFTY50' : idx.symbol;
-      if (shortSymbol !== idx.symbol) {
-        insertQuote.run(
-          shortSymbol,
-          idx.name,
-          idx.nameMr,
+      await prisma.indexQuote.upsert({
+        where: { symbol: idx.symbol },
+        create: {
+          symbol: idx.symbol,
+          name: idx.name,
+          nameMr: idx.nameMr,
           ltp,
           change,
           changePct,
@@ -111,8 +63,54 @@ export async function ingestIndices(fetchHistory = true) {
           prevClose,
           quoteTime,
           asOf,
-          'Yahoo Finance (Exchange Feed)'
-        );
+          source: 'Yahoo Finance (Exchange Feed)',
+          delayed: 1,
+        },
+        update: {
+          ltp,
+          change,
+          changePct,
+          high,
+          low,
+          prevClose,
+          quoteTime,
+          asOf,
+          source: 'Yahoo Finance (Exchange Feed)',
+        },
+      });
+
+      // Also upsert short alias key like SENSEX and NIFTY50 so legacy lookups succeed
+      const shortSymbol = idx.symbol === '^BSESN' ? 'SENSEX' : idx.symbol === '^NSEI' ? 'NIFTY50' : idx.symbol;
+      if (shortSymbol !== idx.symbol) {
+        await prisma.indexQuote.upsert({
+          where: { symbol: shortSymbol },
+          create: {
+            symbol: shortSymbol,
+            name: idx.name,
+            nameMr: idx.nameMr,
+            ltp,
+            change,
+            changePct,
+            high,
+            low,
+            prevClose,
+            quoteTime,
+            asOf,
+            source: 'Yahoo Finance (Exchange Feed)',
+            delayed: 1,
+          },
+          update: {
+            ltp,
+            change,
+            changePct,
+            high,
+            low,
+            prevClose,
+            quoteTime,
+            asOf,
+            source: 'Yahoo Finance (Exchange Feed)',
+          },
+        });
       }
 
       // Upsert Historical OHLCV
@@ -121,41 +119,39 @@ export async function ingestIndices(fetchHistory = true) {
         const quotes = result.indicators.quote[0];
         const adjCloses = result.indicators?.adjclose?.[0]?.adjclose || quotes.close;
 
-        let histCount = 0;
-        db.exec('BEGIN TRANSACTION;');
-        try {
-          for (let i = 0; i < timestamps.length; i++) {
-            const date = new Date(timestamps[i] * 1000).toISOString().split('T')[0];
-            const open = quotes.open?.[i] || quotes.close?.[i];
-            const h = quotes.high?.[i] || quotes.close?.[i];
-            const l = quotes.low?.[i] || quotes.close?.[i];
-            const close = quotes.close?.[i];
-            const adjClose = adjCloses?.[i] || close;
-            const volume = quotes.volume?.[i] || 0;
+        const histRecords: any[] = [];
+        for (let i = 0; i < timestamps.length; i++) {
+          const date = new Date(timestamps[i] * 1000).toISOString().split('T')[0];
+          const open = quotes.open?.[i] || quotes.close?.[i];
+          const h = quotes.high?.[i] || quotes.close?.[i];
+          const l = quotes.low?.[i] || quotes.close?.[i];
+          const close = quotes.close?.[i];
+          const adjClose = adjCloses?.[i] || close;
+          const volume = quotes.volume?.[i] || 0;
 
-            if (close !== null && close !== undefined) {
-              const histId = `${idx.symbol}-${date}`;
-              insertHistory.run(
-                histId,
-                idx.symbol,
-                date,
-                open,
-                h,
-                l,
-                close,
-                adjClose,
-                volume,
-                asOf,
-                'Yahoo Finance (Exchange Feed)'
-              );
-              histCount++;
-            }
+          if (close !== null && close !== undefined) {
+            histRecords.push({
+              id: `${idx.symbol}-${date}`,
+              symbol: idx.symbol,
+              date,
+              open,
+              high: h,
+              low: l,
+              close,
+              adjClose,
+              volume,
+              asOf,
+              source: 'Yahoo Finance (Exchange Feed)',
+            });
           }
-          db.exec('COMMIT;');
-          console.log(`Saved ${histCount} daily historical points for ${idx.symbol}.`);
-        } catch (e) {
-          db.exec('ROLLBACK;');
-          console.error(`Error saving history for ${idx.symbol}:`, e);
+        }
+
+        if (histRecords.length > 0) {
+          await prisma.indexHistory.createMany({
+            data: histRecords,
+            skipDuplicates: true,
+          });
+          console.log(`Saved ${histRecords.length} daily historical points for ${idx.symbol}.`);
         }
       }
     } catch (err: any) {
@@ -164,15 +160,23 @@ export async function ingestIndices(fetchHistory = true) {
   }
 
   // Update freshness
-  db.prepare(`
-    INSERT INTO data_freshness (dataset, latest_as_of, last_successful_run, record_count, status)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(dataset) DO UPDATE SET
-      latest_as_of = excluded.latest_as_of,
-      last_successful_run = excluded.last_successful_run,
-      record_count = excluded.record_count,
-      status = excluded.status
-  `).run('index_data', new Date().toISOString(), new Date().toISOString(), INDICES.length, 'OK');
+  const nowIso = new Date().toISOString();
+  await prisma.dataFreshness.upsert({
+    where: { dataset: 'index_data' },
+    create: {
+      dataset: 'index_data',
+      latestAsOf: nowIso,
+      lastSuccessfulRun: nowIso,
+      recordCount: INDICES.length,
+      status: 'OK',
+    },
+    update: {
+      latestAsOf: nowIso,
+      lastSuccessfulRun: nowIso,
+      recordCount: INDICES.length,
+      status: 'OK',
+    },
+  });
 
   console.log('Index ingestion completed.');
 }

@@ -1,44 +1,50 @@
 import { NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { prisma } from '@/lib/prisma';
 import { getMarketStatus } from '@/lib/dates';
 
-export async function GET() {
-  const db = getDb();
+export const dynamic = 'force-dynamic';
 
+export async function GET() {
   // 1. Company Master stats
-  const totalComp = (db.prepare('SELECT COUNT(*) as c FROM company').get() as any).c;
-  const dualComp = (db.prepare('SELECT COUNT(*) as c FROM company WHERE nse_symbol IS NOT NULL AND bse_code IS NOT NULL').get() as any).c;
-  const nseOnlyComp = (db.prepare('SELECT COUNT(*) as c FROM company WHERE nse_symbol IS NOT NULL AND bse_code IS NULL').get() as any).c;
-  const bseOnlyComp = (db.prepare('SELECT COUNT(*) as c FROM company WHERE nse_symbol IS NULL AND bse_code IS NOT NULL').get() as any).c;
+  const totalComp = await prisma.company.count();
+  const dualComp = await prisma.company.count({
+    where: { nseSymbol: { not: null }, bseCode: { not: null } },
+  });
+  const nseOnlyComp = await prisma.company.count({
+    where: { nseSymbol: { not: null }, bseCode: null },
+  });
+  const bseOnlyComp = await prisma.company.count({
+    where: { nseSymbol: null, bseCode: { not: null } },
+  });
 
   // 2. Price stats
-  const livePricesCount = (db.prepare('SELECT COUNT(*) as c FROM price_live').get() as any).c;
-  const latestLiveQuote = (db.prepare('SELECT MAX(quote_time) as q FROM price_live').get() as any)?.q;
+  const livePricesCount = await prisma.priceLive.count();
+  const latestLiveQuote = (await prisma.priceLive.aggregate({ _max: { quoteTime: true } }))._max.quoteTime;
 
-  const historyRowsCount = (db.prepare('SELECT COUNT(*) as c FROM price_history').get() as any).c;
-  const latestHistoryDate = (db.prepare('SELECT MAX(date) as d FROM price_history').get() as any)?.d;
+  const historyRowsCount = await prisma.priceHistory.count();
+  const latestHistoryDate = (await prisma.priceHistory.aggregate({ _max: { date: true } }))._max.date;
 
   // 3. Index stats
-  const indexQuotesCount = (db.prepare('SELECT COUNT(*) as c FROM index_quote').get() as any).c;
-  const latestIndexHistoryDate = (db.prepare('SELECT MAX(date) as d FROM index_history').get() as any)?.d;
+  const indexQuotesCount = await prisma.indexQuote.count();
+  const latestIndexHistoryDate = (await prisma.indexHistory.aggregate({ _max: { date: true } }))._max.date;
 
   // 4. Financials stats
-  const annualFinCount = (db.prepare('SELECT COUNT(*) as c FROM financials_annual').get() as any).c;
-  const quarterlyFinCount = (db.prepare('SELECT COUNT(*) as c FROM financials_quarterly').get() as any).c;
-  const annualByFy = db.prepare('SELECT fiscal_year, COUNT(*) as count FROM financials_annual GROUP BY fiscal_year ORDER BY fiscal_year DESC').all();
-  const quarterlyByQ = db.prepare('SELECT quarter_label, COUNT(*) as count FROM financials_quarterly GROUP BY quarter_label ORDER BY period_end_date DESC LIMIT 8').all();
+  const annualFinCount = await prisma.financialsAnnual.count();
+  const quarterlyFinCount = await prisma.financialsQuarterly.count();
+  const annualByFy: any[] = await prisma.$queryRawUnsafe('SELECT fiscal_year, COUNT(*)::int as count FROM financials_annual GROUP BY fiscal_year ORDER BY fiscal_year DESC');
+  const quarterlyByQ: any[] = await prisma.$queryRawUnsafe('SELECT quarter_label, COUNT(*)::int as count FROM financials_quarterly GROUP BY quarter_label, period_end_date ORDER BY period_end_date DESC LIMIT 8');
 
   // 5. Shareholding & Corporate Actions
-  const shareholdingCount = (db.prepare('SELECT COUNT(*) as c FROM shareholding').get() as any).c;
-  const corpActionsCount = (db.prepare('SELECT COUNT(*) as c FROM corporate_action').get() as any).c;
-  const dividendsCount = (db.prepare("SELECT COUNT(*) as c FROM corporate_action WHERE type = 'DIVIDEND'").get() as any).c;
-  const splitsCount = (db.prepare("SELECT COUNT(*) as c FROM corporate_action WHERE type IN ('SPLIT', 'BONUS')").get() as any).c;
+  const shareholdingCount = await prisma.shareholding.count();
+  const corpActionsCount = await prisma.corporateAction.count();
+  const dividendsCount = await prisma.corporateAction.count({ where: { type: 'DIVIDEND' } });
+  const splitsCount = await prisma.corporateAction.count({ where: { type: { in: ['SPLIT', 'BONUS'] } } });
 
   // 6. Data Freshness table
-  const freshnessRows = db.prepare('SELECT * FROM data_freshness').all();
+  const freshnessRows = await prisma.dataFreshness.findMany();
 
   // 7. Holidays
-  const holidaysCount = (db.prepare('SELECT COUNT(*) as c FROM market_holiday').get() as any).c;
+  const holidaysCount = await prisma.marketHoliday.count();
 
   return NextResponse.json({
     status: 'HEALTHY',

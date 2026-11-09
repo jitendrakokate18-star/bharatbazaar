@@ -1,0 +1,325 @@
+datasource db {
+  provider  = "postgresql"
+  url       = env("POSTGRES_PRISMA_URL")
+  directUrl = env("POSTGRES_URL_NON_POOLING")
+}
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+model Company {
+  id                  String   @id
+  isin                String   @unique
+  nseSymbol           String?  @map("nse_symbol")
+  bseCode             String?  @map("bse_code")
+  bseScripId         String?  @map("bse_scrip_id")
+  name                String
+  nameMr              String?  @map("name_mr")
+  sector              String?
+  sectorMr            String?  @map("sector_mr")
+  sectorSlug          String?  @map("sector_slug")
+  industry            String?
+  industryMr          String?  @map("industry_mr")
+  seriesGroup         String?  @map("series_group")
+  faceValue           Float?   @map("face_value")
+  listingDate         String?  @map("listing_date")
+  status              String?  @default("ACTIVE")
+  segment             String?  @default("MAIN")
+  website             String?
+  logoUrl             String?  @map("logo_url")
+  hasBrands           Int      @default(0) @map("has_brands")
+  sharesOutstanding   Float?   @map("shares_outstanding")
+  sharesAsOf          String?  @map("shares_as_of")
+  marketCapCategory   String?  @map("market_cap_category")
+  lastTradedDate      String?  @map("last_traded_date")
+  createdAt           String   @map("created_at")
+  updatedAt           String   @map("updated_at")
+
+  @@index([isin], map: "idx_company_isin")
+  @@index([nseSymbol], map: "idx_company_nse")
+  @@index([bseCode], map: "idx_company_bse")
+  @@index([sector], map: "idx_company_sector")
+  @@index([sectorSlug], map: "idx_company_sector_slug")
+  @@index([marketCapCategory], map: "idx_company_mcap_cat")
+  @@map("company")
+}
+
+model CompanyProfile {
+  id           String  @id
+  companyId    String  @map("company_id")
+  isin         String
+  locale       String
+  description  String?
+  history      String?
+  segments     String?
+  subsidiaries String?
+  management   String?
+  foundedYear  Int?    @map("founded_year")
+  headquarters String?
+  milestones   String?
+  asOf         String  @map("as_of")
+  source       String
+
+  @@unique([isin, locale], map: "uq_company_profile")
+  @@map("company_profile")
+}
+
+model Brand {
+  id               String  @id
+  parentCompanyId  String  @map("parent_company_id")
+  parentIsin       String  @map("parent_isin")
+  name             String
+  nameMr           String? @map("name_mr")
+  category         String?
+  categoryMr       String? @map("category_mr")
+  launchYear       Int?    @map("launch_year")
+  logoUrl          String? @map("logo_url")
+  owningEntityId   String? @map("owning_entity_id")
+  descriptionEn    String? @map("description_en")
+  descriptionMr    String? @map("description_mr")
+  positioningEn    String? @map("positioning_en")
+  positioningMr    String? @map("positioning_mr")
+  keyProductsEn    String? @map("key_products_en")
+  keyProductsMr    String? @map("key_products_mr")
+  notableFactsEn   String? @map("notable_facts_en")
+  notableFactsMr   String? @map("notable_facts_mr")
+  asOf             String  @map("as_of")
+  source           String
+
+  @@index([parentCompanyId], map: "idx_brand_parent")
+  @@map("brand")
+}
+
+model PriceLive {
+  id               String  @id
+  isin             String
+  exchange         String
+  ltp              Float
+  change           Float?
+  changePct        Float?  @map("change_pct")
+  volume           Float?
+  dayHigh          Float?  @map("day_high")
+  dayLow           Float?  @map("day_low")
+  open             Float?
+  prevClose        Float?  @map("prev_close")
+  fiftyTwoWeekHigh Float?  @map("fifty_two_week_high")
+  fiftyTwoWeekLow  Float?  @map("fifty_two_week_low")
+  quoteTime        String  @map("quote_time")
+  asOf             String  @map("as_of")
+  source           String
+  delayed          Int     @default(1)
+  isStale          Int     @default(0) @map("is_stale")
+
+  @@unique([isin, exchange], map: "uq_price_live")
+  @@index([isin], map: "idx_price_live_isin")
+  @@index([quoteTime], map: "idx_price_live_quote_time")
+  @@map("price_live")
+}
+
+model PriceHistory {
+  id          String  @id
+  isin        String
+  exchange    String
+  date        String
+  open        Float?
+  high        Float?
+  low         Float?
+  close       Float
+  adjClose    Float   @map("adj_close")
+  volume      Float?
+  deliveryPct Float?  @map("delivery_pct")
+  asOf        String  @map("as_of")
+  source      String
+
+  @@unique([isin, exchange, date], map: "uq_price_history")
+  @@index([isin, exchange, date], map: "idx_price_hist_lookup")
+  @@index([isin], map: "idx_price_hist_isin")
+  @@index([date], map: "idx_price_hist_date")
+  @@map("price_history")
+}
+
+model IndexQuote {
+  symbol     String  @id
+  name       String
+  nameMr     String  @map("name_mr")
+  ltp        Float
+  change     Float
+  changePct  Float   @map("change_pct")
+  high       Float?
+  low        Float?
+  prevClose  Float?  @map("prev_close")
+  quoteTime  String  @map("quote_time")
+  asOf       String  @map("as_of")
+  source     String
+  delayed    Int     @default(1)
+
+  @@map("index_quote")
+}
+
+model IndexHistory {
+  id       String  @id
+  symbol   String
+  date     String
+  open     Float
+  high     Float
+  low      Float
+  close    Float
+  adjClose Float   @map("adj_close")
+  volume   Float
+  asOf     String  @map("as_of")
+  source   String
+
+  @@unique([symbol, date], map: "uq_index_history")
+  @@index([symbol, date], map: "idx_index_hist")
+  @@map("index_history")
+}
+
+model FinancialsAnnual {
+  id             String  @id
+  isin           String
+  period         String
+  fiscalYear     Int     @map("fiscal_year")
+  periodEndDate  String  @map("period_end_date")
+  revenueCr      Float?  @map("revenue_cr")
+  opProfitCr     Float?  @map("op_profit_cr")
+  opMarginPct    Float?  @map("op_margin_pct")
+  netProfitCr    Float?  @map("net_profit_cr")
+  eps            Float?
+  totalDebtCr    Float?  @map("total_debt_cr")
+  netWorthCr     Float?  @map("net_worth_cr")
+  isConsolidated Int     @default(1) @map("is_consolidated")
+  asOf           String  @map("as_of")
+  source         String
+
+  @@unique([isin, period], map: "uq_financials_annual")
+  @@index([isin, fiscalYear], map: "idx_fin_ann")
+  @@map("financials_annual")
+}
+
+model FinancialsQuarterly {
+  id             String  @id
+  isin           String
+  quarterLabel   String  @map("quarter_label")
+  periodEndDate  String  @map("period_end_date")
+  revenueCr      Float?  @map("revenue_cr")
+  opProfitCr     Float?  @map("op_profit_cr")
+  opMarginPct    Float?  @map("op_margin_pct")
+  netProfitCr    Float?  @map("net_profit_cr")
+  eps            Float?
+  totalDebtCr    Float?  @map("total_debt_cr")
+  netWorthCr     Float?  @map("net_worth_cr")
+  isConsolidated Int     @default(1) @map("is_consolidated")
+  asOf           String  @map("as_of")
+  source         String
+
+  @@unique([isin, quarterLabel], map: "uq_financials_quarterly")
+  @@index([isin, periodEndDate], map: "idx_fin_qtr")
+  @@map("financials_quarterly")
+}
+
+model Ratios {
+  id                String  @id
+  isin              String
+  period            String
+  peTtm             Float?  @map("pe_ttm")
+  peAnnual          Float?  @map("pe_annual")
+  pb                Float?
+  roe               Float?
+  roce              Float?
+  debtToEquity      Float?  @map("debt_to_equity")
+  interestCoverage  Float?  @map("interest_coverage")
+  dividendPayoutPct Float?  @map("dividend_payout_pct")
+  dividendYield     Float?  @map("dividend_yield")
+  epsGrowth         Float?  @map("eps_growth")
+  asOf              String  @map("as_of")
+  source            String
+
+  @@unique([isin, period], map: "uq_ratios")
+  @@index([isin], map: "idx_ratios_isin")
+  @@map("ratios")
+}
+
+model Shareholding {
+  id            String  @id
+  isin          String
+  quarterLabel  String  @map("quarter_label")
+  periodEndDate String  @map("period_end_date")
+  promoter      Float?
+  fii           Float?
+  dii           Float?
+  public        Float?
+  pledgePct     Float?  @map("pledge_pct")
+  asOf          String  @map("as_of")
+  source        String
+
+  @@unique([isin, quarterLabel], map: "uq_shareholding")
+  @@index([isin], map: "idx_shareholding_isin")
+  @@map("shareholding")
+}
+
+model CorporateAction {
+  id            String  @id
+  isin          String
+  type          String
+  exDate        String  @map("ex_date")
+  recordDate    String? @map("record_date")
+  ratioOrAmount String  @map("ratio_or_amount")
+  descriptionEn String? @map("description_en")
+  descriptionMr String? @map("description_mr")
+  asOf          String  @map("as_of")
+  source        String
+
+  @@unique([isin, type, exDate, ratioOrAmount], map: "uq_corp_action")
+  @@index([isin, exDate], map: "idx_corp_action_isin")
+  @@map("corporate_action")
+}
+
+model MarketHoliday {
+  id            String @id
+  date          String
+  holidayName   String @map("holiday_name")
+  holidayNameMr String @map("holiday_name_mr")
+  exchange      String
+
+  @@unique([date, exchange], map: "uq_market_holiday")
+  @@map("market_holiday")
+}
+
+model IngestionRun {
+  id               String  @id
+  jobName          String  @map("job_name")
+  status           String
+  recordsProcessed Int     @default(0) @map("records_processed")
+  recordsFailed    Int     @default(0) @map("records_failed")
+  errorMessage     String? @map("error_message")
+  startedAt        String  @map("started_at")
+  completedAt      String? @map("completed_at")
+
+  @@map("ingestion_run")
+}
+
+model DataFreshness {
+  dataset           String  @id
+  latestAsOf        String? @map("latest_as_of")
+  lastSuccessfulRun String? @map("last_successful_run")
+  lastError         String? @map("last_error")
+  recordCount       Int     @default(0) @map("record_count")
+  status            String? @default("OK")
+
+  @@map("data_freshness")
+}
+
+model SectorTaxonomy {
+  id            String  @id
+  slug          String  @unique
+  nameEn        String  @map("name_en")
+  nameMr        String  @map("name_mr")
+  aliasesEn     String? @map("aliases_en")
+  aliasesMr     String? @map("aliases_mr")
+  descriptionEn String? @map("description_en")
+  descriptionMr String? @map("description_mr")
+
+  @@map("sector_taxonomy")
+}

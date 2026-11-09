@@ -21,15 +21,15 @@ import { dbService } from '../dbService';
 
 export class RealFreeProvider implements StockDataProvider {
   async getCompany(isin: string): Promise<Company | null> {
-    return dbService.getCompanyByIsin(isin);
+    return await dbService.getCompanyByIsin(isin);
   }
 
   async getAllCompanies(filters?: DirectoryFilters): Promise<{ companies: Company[]; total: number }> {
-    return dbService.getCompanies(filters);
+    return await dbService.getCompanies(filters);
   }
 
   async getCompanyProfile(isin: string, locale: Locale = 'en'): Promise<ProvenanceWrapper<CompanyProfile | null>> {
-    const profile = dbService.getCompanyProfile(isin, locale);
+    const profile = await dbService.getCompanyProfile(isin, locale);
     return {
       data: profile,
       asOf: profile?.asOf || new Date().toISOString(),
@@ -39,7 +39,7 @@ export class RealFreeProvider implements StockDataProvider {
   }
 
   async getBrandsByCompany(companyId: string): Promise<ProvenanceWrapper<Brand[]>> {
-    const brands = dbService.getBrandsByCompany(companyId);
+    const brands = await dbService.getBrandsByCompany(companyId);
     return {
       data: brands,
       asOf: brands[0]?.asOf || new Date().toISOString(),
@@ -48,7 +48,7 @@ export class RealFreeProvider implements StockDataProvider {
   }
 
   async getBrand(brandId: string): Promise<ProvenanceWrapper<Brand | null>> {
-    const brand = dbService.getBrandById(brandId);
+    const brand = await dbService.getBrandById(brandId);
     return {
       data: brand,
       asOf: brand?.asOf || new Date().toISOString(),
@@ -57,15 +57,15 @@ export class RealFreeProvider implements StockDataProvider {
   }
 
   async search(query: string, lang: Locale = 'en'): Promise<SearchResult[]> {
-    return dbService.search(query, lang);
+    return await dbService.search(query, lang);
   }
 
   async getLivePrice(isin: string): Promise<DualExchangePrice & { isSampleData?: boolean }> {
-    return dbService.getLivePrice(isin);
+    return await dbService.getLivePrice(isin);
   }
 
   async getHistoricalOHLCV(isin: string, range: string = '5Y', exchange: Exchange = 'NSE'): Promise<ProvenanceWrapper<OHLCPoint[]>> {
-    const res = dbService.getPriceHistory(isin, range, exchange);
+    const res = await dbService.getPriceHistory(isin, range, exchange);
     return {
       data: res.history,
       asOf: res.asOf,
@@ -75,7 +75,7 @@ export class RealFreeProvider implements StockDataProvider {
   }
 
   async getIndexQuotes(): Promise<ProvenanceWrapper<IndexData[]>> {
-    const res = dbService.getIndexQuotes();
+    const res = await dbService.getIndexQuotes();
     return {
       data: res.indices,
       asOf: res.asOf,
@@ -85,7 +85,7 @@ export class RealFreeProvider implements StockDataProvider {
   }
 
   async getIndexHistory(symbol: string, range: string = '5Y'): Promise<ProvenanceWrapper<{ date: string; close: number; adjClose: number }[]>> {
-    const res = dbService.getIndexHistory(symbol, range);
+    const res = await dbService.getIndexHistory(symbol, range);
     return {
       data: res.history,
       asOf: res.asOf,
@@ -95,7 +95,7 @@ export class RealFreeProvider implements StockDataProvider {
   }
 
   async getFinancials(isin: string): Promise<ProvenanceWrapper<FiveYearFinancial[]>> {
-    const res = dbService.getFinancials(isin);
+    const res = await dbService.getFinancials(isin);
     return {
       data: res.financials,
       asOf: res.asOf || '',
@@ -104,16 +104,16 @@ export class RealFreeProvider implements StockDataProvider {
   }
 
   async getQuarterlyFinancials(isin: string): Promise<ProvenanceWrapper<any[]>> {
-    const data = dbService.getQuarterlyFinancials(isin);
+    const data = await dbService.getQuarterlyFinancials(isin);
     return {
       data,
-      asOf: data[data.length - 1]?.as_of || '',
+      asOf: data[data.length - 1]?.asOf || data[data.length - 1]?.as_of || '',
       source: 'Exchange Financial Results Filings',
     };
   }
 
   async getShareholding(isin: string): Promise<ProvenanceWrapper<ShareholdingQuarter[]>> {
-    const res = dbService.getShareholding(isin);
+    const res = await dbService.getShareholding(isin);
     return {
       data: res.shareholding,
       asOf: res.asOf || '',
@@ -122,7 +122,7 @@ export class RealFreeProvider implements StockDataProvider {
   }
 
   async getCorporateActions(isin: string): Promise<ProvenanceWrapper<CorporateAction[]>> {
-    const res = dbService.getCorporateActions(isin);
+    const res = await dbService.getCorporateActions(isin);
     return {
       data: res.corporateActions,
       asOf: res.asOf || '',
@@ -131,7 +131,7 @@ export class RealFreeProvider implements StockDataProvider {
   }
 
   async getTrailingDividendYield(isin: string, currentPrice: number): Promise<number | null> {
-    return dbService.computeTrailingDividendYield(isin, currentPrice);
+    return await dbService.computeTrailingDividendYield(isin, currentPrice);
   }
 }
 

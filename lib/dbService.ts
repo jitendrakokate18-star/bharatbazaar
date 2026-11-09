@@ -1,4 +1,4 @@
-import { getDb } from './db.ts';
+import { prisma } from './prisma';
 import type {
   Company,
   CompanyProfile,
@@ -13,7 +13,6 @@ import type {
   MarketStatus,
   Exchange,
 } from '../types/index.ts';
-import { getMarketStatus } from './dates.ts';
 
 export interface CompanyWithPrice extends Company {
   livePriceNse?: number;
@@ -26,18 +25,17 @@ export interface CompanyWithPrice extends Company {
 }
 
 export class DbService {
-  private db = getDb();
-
   // --- Company Master Queries ---
-  getCompanyByIsin(isin: string): CompanyWithPrice | null {
-    const stmt = this.db.prepare('SELECT * FROM company WHERE isin = ?');
-    const row = stmt.get(isin) as any;
+  async getCompanyByIsin(isin: string): Promise<CompanyWithPrice | null> {
+    const row = await prisma.company.findUnique({
+      where: { isin },
+    });
     if (!row) return null;
 
     // Get live prices to compute live market cap
-    const prices = this.getLivePrice(isin);
+    const prices = await this.getLivePrice(isin);
     const ltp = prices.nse?.ltp || prices.bse?.ltp || 0;
-    const shares = row.shares_outstanding || 0;
+    const shares = row.sharesOutstanding || 0;
     // Market cap in Crores = (LTP * shares) / 10,000,000 (1 Crore = 10^7)
     const computedMcapCr = shares > 0 && ltp > 0 ? Number(((ltp * shares) / 10000000).toFixed(2)) : 0;
 
@@ -45,19 +43,19 @@ export class DbService {
       id: row.id,
       isin: row.isin,
       name: row.name,
-      nameMr: row.name_mr || row.name,
-      nseSymbol: row.nse_symbol || undefined,
-      bseCode: row.bse_code || undefined,
+      nameMr: row.nameMr || row.name,
+      nseSymbol: row.nseSymbol || undefined,
+      bseCode: row.bseCode || undefined,
       sector: row.sector || 'Diversified',
-      sectorMr: row.sector_mr || 'विविध उद्योग',
+      sectorMr: row.sectorMr || 'विविध उद्योग',
       industry: row.industry || 'General',
-      industryMr: row.industry_mr || 'सामान्य उद्योग',
-      listingDate: row.listing_date || '',
-      status: row.status as any,
+      industryMr: row.industryMr || 'सामान्य उद्योग',
+      listingDate: row.listingDate || '',
+      status: (row.status as any) || 'ACTIVE',
       website: row.website || '',
-      logoUrl: row.logo_url || undefined,
-      hasBrands: Boolean(row.has_brands),
-      marketCapCategory: (row.market_cap_category as any) || (computedMcapCr > 20000 ? 'large' : computedMcapCr > 5000 ? 'mid' : 'small'),
+      logoUrl: row.logoUrl || undefined,
+      hasBrands: Boolean(row.hasBrands),
+      marketCapCategory: (row.marketCapCategory as any) || (computedMcapCr > 20000 ? 'large' : computedMcapCr > 5000 ? 'mid' : 'small'),
       marketCapCr: computedMcapCr,
       livePriceNse: prices.nse?.ltp,
       livePriceBse: prices.bse?.ltp,
@@ -68,7 +66,7 @@ export class DbService {
     };
   }
 
-  getCompanies(filters?: {
+  async getCompanies(filters?: {
     search?: string;
     exchange?: 'ALL' | 'NSE' | 'BSE';
     sector?: string;
@@ -77,72 +75,95 @@ export class DbService {
     sortBy?: string;
     page?: number;
     pageSize?: number;
-  }): { companies: CompanyWithPrice[]; total: number } {
-    let whereClauses: string[] = [];
-    let params: any[] = [];
+  }): Promise<{ companies: CompanyWithPrice[]; total: number }> {
+    const whereClauses: string[] = [];
+    const params: any[] = [];
 
     if (filters?.search && filters.search.trim()) {
       const q = `%${filters.search.trim()}%`;
-      whereClauses.push('(name LIKE ? OR name_mr LIKE ? OR isin LIKE ? OR nse_symbol LIKE ? OR bse_code LIKE ? OR sector LIKE ? OR industry LIKE ?)');
-      params.push(q, q, q, q, q, q, q);
+      const pIdx = params.push(q);
+      whereClauses.push(`(c.name ILIKE $${pIdx} OR c.name_mr ILIKE $${pIdx} OR c.isin ILIKE $${pIdx} OR c.nse_symbol ILIKE $${pIdx} OR c.bse_code ILIKE $${pIdx} OR c.sector ILIKE $${pIdx} OR c.industry ILIKE $${pIdx})`);
     }
 
     if (filters?.exchange && filters.exchange !== 'ALL') {
       if (filters.exchange === 'NSE') {
-        whereClauses.push('nse_symbol IS NOT NULL');
+        whereClauses.push('c.nse_symbol IS NOT NULL');
       } else if (filters.exchange === 'BSE') {
-        whereClauses.push('bse_code IS NOT NULL');
+        whereClauses.push('c.bse_code IS NOT NULL');
       }
     }
 
     if (filters?.sector && filters.sector !== 'ALL') {
-      whereClauses.push('(sector = ? OR sector_slug = ? OR sector_mr = ?)');
-      params.push(filters.sector, filters.sector, filters.sector);
+      const pIdx = params.push(filters.sector);
+      whereClauses.push(`(c.sector = $${pIdx} OR c.sector_slug = $${pIdx} OR c.sector_mr = $${pIdx})`);
     }
 
     if (filters?.marketCapCategory && filters.marketCapCategory !== 'all') {
-      whereClauses.push('market_cap_category = ?');
-      params.push(filters.marketCapCategory);
+      const pIdx = params.push(filters.marketCapCategory);
+      whereClauses.push(`c.market_cap_category = $${pIdx}`);
     }
 
     if (filters?.hasBrandsOnly) {
-      whereClauses.push('has_brands = 1');
+      whereClauses.push('c.has_brands = 1');
     }
 
     const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
     // Total count query
-    const countStmt = this.db.prepare(`SELECT COUNT(*) as count FROM company ${whereStr}`);
-    const totalRow = (params.length > 0 ? countStmt.get(...params) : countStmt.get()) as any;
-    const total = totalRow?.count || 0;
+    const countSql = `SELECT COUNT(*)::int as count FROM company c ${whereStr}`;
+    const countRows: any[] = await prisma.$queryRawUnsafe(countSql, ...params);
+    const total = countRows[0]?.count || 0;
 
     const page = filters?.page || 1;
     const pageSize = filters?.pageSize || 50;
     const offset = (page - 1) * pageSize;
 
     // Order By
-    let orderClause = 'ORDER BY (coalesce(shares_outstanding, 0) * coalesce((SELECT ltp FROM price_live WHERE price_live.isin = company.isin LIMIT 1), 0)) DESC';
+    let orderClause = 'ORDER BY (COALESCE(c.shares_outstanding, 0) * COALESCE((SELECT ltp FROM price_live pl WHERE pl.isin = c.isin LIMIT 1), 0)) DESC';
     if (filters?.sortBy === 'nameAsc') {
-      orderClause = 'ORDER BY name ASC';
+      orderClause = 'ORDER BY c.name ASC';
     } else if (filters?.sortBy === 'marketCapAsc') {
-      orderClause = 'ORDER BY (coalesce(shares_outstanding, 0) * coalesce((SELECT ltp FROM price_live WHERE price_live.isin = company.isin LIMIT 1), 0)) ASC';
+      orderClause = 'ORDER BY (COALESCE(c.shares_outstanding, 0) * COALESCE((SELECT ltp FROM price_live pl WHERE pl.isin = c.isin LIMIT 1), 0)) ASC';
     } else if (filters?.sortBy === 'gainers') {
-      orderClause = 'ORDER BY (SELECT change_pct FROM price_live WHERE price_live.isin = company.isin LIMIT 1) DESC';
+      orderClause = 'ORDER BY (SELECT change_pct FROM price_live pl WHERE pl.isin = c.isin LIMIT 1) DESC NULLS LAST';
     } else if (filters?.sortBy === 'losers') {
-      orderClause = 'ORDER BY (SELECT change_pct FROM price_live WHERE price_live.isin = company.isin LIMIT 1) ASC';
+      orderClause = 'ORDER BY (SELECT change_pct FROM price_live pl WHERE pl.isin = c.isin LIMIT 1) ASC NULLS LAST';
     }
 
-    const selectStmt = this.db.prepare(`
-      SELECT * FROM company ${whereStr} ${orderClause} LIMIT ? OFFSET ?
-    `);
+    const limitIdx = params.push(pageSize);
+    const offsetIdx = params.push(offset);
 
-    const rows = (params.length > 0 ? selectStmt.all(...params, pageSize, offset) : selectStmt.all(pageSize, offset)) as any[];
+    const selectSql = `
+      SELECT c.*,
+             (COALESCE(c.shares_outstanding, 0) * COALESCE((SELECT ltp FROM price_live pl WHERE pl.isin = c.isin LIMIT 1), 0) / 10000000.0) as computed_mcap_cr,
+             (SELECT ltp FROM price_live pl WHERE pl.isin = c.isin AND pl.exchange = 'NSE' LIMIT 1) as nse_ltp,
+             (SELECT change_pct FROM price_live pl WHERE pl.isin = c.isin AND pl.exchange = 'NSE' LIMIT 1) as nse_change_pct,
+             (SELECT quote_time FROM price_live pl WHERE pl.isin = c.isin AND pl.exchange = 'NSE' LIMIT 1) as nse_quote_time,
+             (SELECT source FROM price_live pl WHERE pl.isin = c.isin AND pl.exchange = 'NSE' LIMIT 1) as nse_source,
+             (SELECT ltp FROM price_live pl WHERE pl.isin = c.isin AND pl.exchange = 'BSE' LIMIT 1) as bse_ltp,
+             (SELECT change_pct FROM price_live pl WHERE pl.isin = c.isin AND pl.exchange = 'BSE' LIMIT 1) as bse_change_pct,
+             (SELECT quote_time FROM price_live pl WHERE pl.isin = c.isin AND pl.exchange = 'BSE' LIMIT 1) as bse_quote_time,
+             (SELECT source FROM price_live pl WHERE pl.isin = c.isin AND pl.exchange = 'BSE' LIMIT 1) as bse_source
+      FROM company c
+      ${whereStr}
+      ${orderClause}
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+    `;
+
+    const rows: any[] = await prisma.$queryRawUnsafe(selectSql, ...params);
 
     const companies = rows.map((row) => {
-      const prices = this.getLivePrice(row.isin);
-      const ltp = prices.nse?.ltp || prices.bse?.ltp || 0;
-      const shares = row.shares_outstanding || 0;
-      const computedMcapCr = shares > 0 && ltp > 0 ? Number(((ltp * shares) / 10000000).toFixed(2)) : 0;
+      const computedMcapCr = row.computed_mcap_cr ? Number(Number(row.computed_mcap_cr).toFixed(2)) : 0;
+      const livePriceNse = row.nse_ltp !== null && row.nse_ltp !== undefined ? Number(row.nse_ltp) : undefined;
+      const livePriceBse = row.bse_ltp !== null && row.bse_ltp !== undefined ? Number(row.bse_ltp) : undefined;
+      const dayChangePct =
+        row.nse_change_pct !== null && row.nse_change_pct !== undefined
+          ? Number(row.nse_change_pct)
+          : row.bse_change_pct !== null && row.bse_change_pct !== undefined
+          ? Number(row.bse_change_pct)
+          : undefined;
+      const asOf = row.nse_quote_time || row.bse_quote_time || new Date().toISOString();
+      const source = row.nse_source || row.bse_source || 'Exchange Master';
 
       return {
         id: row.id,
@@ -156,17 +177,17 @@ export class DbService {
         industry: row.industry || 'General',
         industryMr: row.industry_mr || 'सामान्य',
         listingDate: row.listing_date || '',
-        status: row.status as any,
+        status: (row.status as any) || 'ACTIVE',
         website: row.website || '',
         logoUrl: row.logo_url || undefined,
         hasBrands: Boolean(row.has_brands),
         marketCapCategory: (row.market_cap_category as any) || (computedMcapCr > 20000 ? 'large' : computedMcapCr > 5000 ? 'mid' : 'small'),
         marketCapCr: computedMcapCr,
-        livePriceNse: prices.nse?.ltp,
-        livePriceBse: prices.bse?.ltp,
-        dayChangePct: prices.nse?.changePct ?? prices.bse?.changePct,
-        asOf: prices.lastUpdated,
-        source: prices.nse?.source || prices.bse?.source || 'Exchange Master',
+        livePriceNse,
+        livePriceBse,
+        dayChangePct,
+        asOf,
+        source,
         isDelayed: true,
       };
     });
@@ -175,16 +196,25 @@ export class DbService {
   }
 
   // --- Company Profile ---
-  getCompanyProfile(isin: string, locale: 'en' | 'mr' = 'en'): (CompanyProfile & { asOf: string; source: string }) | null {
-    const stmt = this.db.prepare('SELECT * FROM company_profile WHERE isin = ? AND locale = ?');
-    let row = stmt.get(isin, locale) as any;
+  async getCompanyProfile(isin: string, locale: 'en' | 'mr' = 'en'): Promise<(CompanyProfile & { asOf: string; source: string }) | null> {
+    let row = await prisma.companyProfile.findUnique({
+      where: {
+        isin_locale: { isin, locale },
+      },
+    });
+
     if (!row && locale === 'mr') {
       // Fallback to English profile
-      row = stmt.get(isin, 'en') as any;
+      row = await prisma.companyProfile.findUnique({
+        where: {
+          isin_locale: { isin, locale: 'en' },
+        },
+      });
     }
+
     if (!row) {
       // Check if company exists to supply base information
-      const comp = this.getCompanyByIsin(isin);
+      const comp = await this.getCompanyByIsin(isin);
       if (!comp) return null;
       return {
         companyId: comp.id,
@@ -210,13 +240,13 @@ export class DbService {
     }
 
     return {
-      companyId: row.company_id,
+      companyId: row.companyId,
       isin: row.isin,
-      foundedYear: row.founded_year || 0,
+      foundedYear: row.foundedYear || 0,
       headquarters: row.headquarters || 'Mumbai, India',
       headquartersMr: row.headquarters || 'मुंबई, भारत',
-      founders: [row.company_id],
-      foundersMr: [row.company_id],
+      founders: [row.companyId],
+      foundersMr: [row.companyId],
       management: row.management ? JSON.parse(row.management) : [],
       description: row.description || '',
       descriptionEn: row.description || '',
@@ -229,80 +259,84 @@ export class DbService {
       subsidiariesEn: row.subsidiaries ? JSON.parse(row.subsidiaries) : [],
       subsidiariesMr: row.subsidiaries ? JSON.parse(row.subsidiaries) : [],
       milestones: row.milestones ? JSON.parse(row.milestones) : [],
-      asOf: row.as_of,
+      asOf: row.asOf,
       source: row.source,
     } as any;
   }
 
   // --- Brands ---
-  getBrandsByCompany(companyId: string): (Brand & { asOf: string; source: string })[] {
-    const stmt = this.db.prepare('SELECT * FROM brand WHERE parent_company_id = ?');
-    const rows = stmt.all(companyId) as any[];
+  async getBrandsByCompany(companyId: string): Promise<(Brand & { asOf: string; source: string })[]> {
+    const rows = await prisma.brand.findMany({
+      where: { parentCompanyId: companyId },
+    });
+
     return rows.map((r) => ({
       id: r.id,
-      parentCompanyId: r.parent_company_id,
-      parentIsin: r.parent_isin,
-      parentCompanyName: r.parent_company_id,
-      parentCompanyNameMr: r.parent_company_id,
+      parentCompanyId: r.parentCompanyId,
+      parentIsin: r.parentIsin,
+      parentCompanyName: r.parentCompanyId,
+      parentCompanyNameMr: r.parentCompanyId,
       name: r.name,
-      nameMr: r.name_mr || r.name,
+      nameMr: r.nameMr || r.name,
       category: r.category || 'Consumer',
-      categoryMr: r.category_mr || 'ग्राहक उत्पादने',
-      launchYear: r.launch_year || 2000,
-      logoUrl: r.logo_url || undefined,
-      owningEntityId: r.owning_entity_id || undefined,
-      descriptionEn: r.description_en || '',
-      descriptionMr: r.description_mr || '',
-      positioningEn: r.positioning_en || '',
-      positioningMr: r.positioning_mr || '',
-      keyProductsEn: r.key_products_en ? JSON.parse(r.key_products_en) : [],
-      keyProductsMr: r.key_products_mr ? JSON.parse(r.key_products_mr) : [],
-      notableFactsEn: r.notable_facts_en ? JSON.parse(r.notable_facts_en) : [],
-      notableFactsMr: r.notable_facts_mr ? JSON.parse(r.notable_facts_mr) : [],
-      asOf: r.as_of,
+      categoryMr: r.categoryMr || 'ग्राहक उत्पादने',
+      launchYear: r.launchYear || 2000,
+      logoUrl: r.logoUrl || undefined,
+      owningEntityId: r.owningEntityId || undefined,
+      descriptionEn: r.descriptionEn || '',
+      descriptionMr: r.descriptionMr || '',
+      positioningEn: r.positioningEn || '',
+      positioningMr: r.positioningMr || '',
+      keyProductsEn: r.keyProductsEn ? JSON.parse(r.keyProductsEn) : [],
+      keyProductsMr: r.keyProductsMr ? JSON.parse(r.keyProductsMr) : [],
+      notableFactsEn: r.notableFactsEn ? JSON.parse(r.notableFactsEn) : [],
+      notableFactsMr: r.notableFactsMr ? JSON.parse(r.notableFactsMr) : [],
+      asOf: r.asOf,
       source: r.source,
     }));
   }
 
-  getBrandById(id: string): (Brand & { asOf: string; source: string }) | null {
-    const stmt = this.db.prepare('SELECT * FROM brand WHERE id = ?');
-    const r = stmt.get(id) as any;
+  async getBrandById(id: string): Promise<(Brand & { asOf: string; source: string }) | null> {
+    const r = await prisma.brand.findUnique({
+      where: { id },
+    });
     if (!r) return null;
 
-    const parentComp = this.getCompanyByIsin(r.parent_isin);
+    const parentComp = await this.getCompanyByIsin(r.parentIsin);
 
     return {
       id: r.id,
-      parentCompanyId: r.parent_company_id,
-      parentIsin: r.parent_isin,
-      parentCompanyName: parentComp ? parentComp.name : r.parent_company_id,
-      parentCompanyNameMr: parentComp ? parentComp.nameMr : r.parent_company_id,
+      parentCompanyId: r.parentCompanyId,
+      parentIsin: r.parentIsin,
+      parentCompanyName: parentComp ? parentComp.name : r.parentCompanyId,
+      parentCompanyNameMr: parentComp ? parentComp.nameMr : r.parentCompanyId,
       name: r.name,
-      nameMr: r.name_mr || r.name,
+      nameMr: r.nameMr || r.name,
       category: r.category || 'Consumer',
-      categoryMr: r.category_mr || 'ग्राहक उत्पादने',
-      launchYear: r.launch_year || 2000,
-      logoUrl: r.logo_url || undefined,
-      owningEntityId: r.owning_entity_id || undefined,
-      descriptionEn: r.description_en || '',
-      descriptionMr: r.description_mr || '',
-      positioningEn: r.positioning_en || '',
-      positioningMr: r.positioning_mr || '',
-      keyProductsEn: r.key_products_en ? JSON.parse(r.key_products_en) : [],
-      keyProductsMr: r.key_products_mr ? JSON.parse(r.key_products_mr) : [],
-      notableFactsEn: r.notable_facts_en ? JSON.parse(r.notable_facts_en) : [],
-      notableFactsMr: r.notable_facts_mr ? JSON.parse(r.notable_facts_mr) : [],
-      asOf: r.as_of,
+      categoryMr: r.categoryMr || 'ग्राहक उत्पादने',
+      launchYear: r.launchYear || 2000,
+      logoUrl: r.logoUrl || undefined,
+      owningEntityId: r.owningEntityId || undefined,
+      descriptionEn: r.descriptionEn || '',
+      descriptionMr: r.descriptionMr || '',
+      positioningEn: r.positioningEn || '',
+      positioningMr: r.positioningMr || '',
+      keyProductsEn: r.keyProductsEn ? JSON.parse(r.keyProductsEn) : [],
+      keyProductsMr: r.keyProductsMr ? JSON.parse(r.keyProductsMr) : [],
+      notableFactsEn: r.notableFactsEn ? JSON.parse(r.notableFactsEn) : [],
+      notableFactsMr: r.notableFactsMr ? JSON.parse(r.notableFactsMr) : [],
+      asOf: r.asOf,
       source: r.source,
     };
   }
 
   // --- Real Live Prices (NSE & BSE) ---
-  getLivePrice(isin: string): DualExchangePrice & { isSampleData?: boolean } {
+  async getLivePrice(isin: string): Promise<DualExchangePrice & { isSampleData?: boolean }> {
     const isMockMode = process.env.DATA_PROVIDER === 'mock';
 
-    const stmt = this.db.prepare('SELECT * FROM price_live WHERE isin = ?');
-    const rows = stmt.all(isin) as any[];
+    const rows = await prisma.priceLive.findMany({
+      where: { isin },
+    });
 
     const nseRow = rows.find((r) => r.exchange === 'NSE');
     const bseRow = rows.find((r) => r.exchange === 'BSE');
@@ -312,17 +346,17 @@ export class DbService {
       exchange: row.exchange as Exchange,
       ltp: row.ltp,
       change: row.change || 0,
-      changePct: row.change_pct || 0,
+      changePct: row.changePct || 0,
       volume: row.volume || 0,
-      dayHigh: row.day_high || row.ltp,
-      dayLow: row.day_low || row.ltp,
+      dayHigh: row.dayHigh || row.ltp,
+      dayLow: row.dayLow || row.ltp,
       open: row.open || row.ltp,
-      prevClose: row.prev_close || row.ltp,
-      fiftyTwoWeekHigh: row.fifty_two_week_high || row.ltp,
-      fiftyTwoWeekLow: row.fifty_two_week_low || row.ltp,
-      timestamp: row.quote_time,
+      prevClose: row.prevClose || row.ltp,
+      fiftyTwoWeekHigh: row.fiftyTwoWeekHigh || row.ltp,
+      fiftyTwoWeekLow: row.fiftyTwoWeekLow || row.ltp,
+      timestamp: row.quoteTime,
       isDelayed: Boolean(row.delayed),
-      as_of: row.as_of,
+      as_of: row.asOf,
       source: isMockMode ? 'SAMPLE DATA (Mock)' : row.source,
     });
 
@@ -332,13 +366,13 @@ export class DbService {
       isin,
       nse: nseRow ? toTick(nseRow) : undefined,
       bse: bseRow ? toTick(bseRow) : undefined,
-      lastUpdated: nseRow?.quote_time || bseRow?.quote_time || now,
+      lastUpdated: nseRow?.quoteTime || bseRow?.quoteTime || now,
       isSampleData: isMockMode,
     };
   }
 
   // --- Price History ---
-  getPriceHistory(isin: string, range: string = '5Y', exchange: Exchange = 'NSE'): { history: OHLCPoint[]; asOf: string; source: string } {
+  async getPriceHistory(isin: string, range: string = '5Y', exchange: Exchange = 'NSE'): Promise<{ history: OHLCPoint[]; asOf: string; source: string }> {
     // Determine start date based on range from current date
     const now = new Date();
     let startDate = new Date();
@@ -350,23 +384,26 @@ export class DbService {
 
     const startStr = startDate.toISOString().split('T')[0];
 
-    const stmt = this.db.prepare(`
-      SELECT * FROM price_history
-      WHERE isin = ? AND exchange = ? AND date >= ?
-      ORDER BY date ASC
-    `);
-
-    let rows = stmt.all(isin, exchange, startStr) as any[];
+    let rows = await prisma.priceHistory.findMany({
+      where: {
+        isin,
+        exchange,
+        date: { gte: startStr },
+      },
+      orderBy: { date: 'asc' },
+    });
 
     // If exchange specific has no rows, try alternate exchange
     if (rows.length === 0) {
       const altExchange = exchange === 'NSE' ? 'BSE' : 'NSE';
-      const altStmt = this.db.prepare(`
-        SELECT * FROM price_history
-        WHERE isin = ? AND exchange = ? AND date >= ?
-        ORDER BY date ASC
-      `);
-      rows = altStmt.all(isin, altExchange, startStr) as any[];
+      rows = await prisma.priceHistory.findMany({
+        where: {
+          isin,
+          exchange: altExchange,
+          date: { gte: startStr },
+        },
+        orderBy: { date: 'asc' },
+      });
     }
 
     if (rows.length === 0) {
@@ -379,22 +416,21 @@ export class DbService {
       high: r.high ?? r.close,
       low: r.low ?? r.close,
       close: r.close,
-      adjClose: r.adj_close ?? r.close,
+      adjClose: r.adjClose ?? r.close,
       volume: r.volume ?? 0,
     }));
 
     const lastRow = rows[rows.length - 1];
     return {
       history,
-      asOf: lastRow?.as_of || lastRow?.date || new Date().toISOString(),
+      asOf: lastRow?.asOf || lastRow?.date || new Date().toISOString(),
       source: lastRow?.source || 'Exchange Bhavcopy / Yahoo Finance',
     };
   }
 
   // --- Real Benchmark Index Quotes & Real 5-Year History ---
-  getIndexQuotes(): { indices: IndexData[]; asOf: string; source: string } {
-    const stmt = this.db.prepare('SELECT * FROM index_quote');
-    const rows = stmt.all() as any[];
+  async getIndexQuotes(): Promise<{ indices: IndexData[]; asOf: string; source: string }> {
+    const rows = await prisma.indexQuote.findMany();
 
     if (rows.length === 0) {
       return { indices: [], asOf: new Date().toISOString(), source: 'Yahoo Finance' };
@@ -403,23 +439,23 @@ export class DbService {
     const indices: IndexData[] = rows.map((r) => ({
       symbol: r.symbol,
       name: r.name,
-      nameMr: r.name_mr,
+      nameMr: r.nameMr,
       ltp: r.ltp,
       change: r.change,
-      changePct: r.change_pct,
+      changePct: r.changePct,
       high: r.high || r.ltp,
       low: r.low || r.ltp,
-      timestamp: r.quote_time,
+      timestamp: r.quoteTime,
     }));
 
     return {
       indices,
-      asOf: rows[0]?.as_of || new Date().toISOString(),
+      asOf: rows[0]?.asOf || new Date().toISOString(),
       source: rows[0]?.source || 'Yahoo Finance (^BSESN / ^NSEI)',
     };
   }
 
-  getIndexHistory(symbol: string, range: string = '5Y'): { history: { date: string; close: number; adjClose: number }[]; asOf: string; source: string } {
+  async getIndexHistory(symbol: string, range: string = '5Y'): Promise<{ history: { date: string; close: number; adjClose: number }[]; asOf: string; source: string }> {
     const now = new Date();
     let startDate = new Date();
     if (range === '1M') startDate.setMonth(now.getMonth() - 1);
@@ -430,37 +466,35 @@ export class DbService {
 
     const startStr = startDate.toISOString().split('T')[0];
 
-    const stmt = this.db.prepare(`
-      SELECT date, close, adj_close, as_of, source
-      FROM index_history
-      WHERE symbol = ? AND date >= ?
-      ORDER BY date ASC
-    `);
-
-    const rows = stmt.all(symbol, startStr) as any[];
+    const rows = await prisma.indexHistory.findMany({
+      where: {
+        symbol,
+        date: { gte: startStr },
+      },
+      orderBy: { date: 'asc' },
+    });
 
     return {
       history: rows.map((r) => ({
         date: r.date,
         close: r.close,
-        adjClose: r.adj_close || r.close,
+        adjClose: r.adjClose || r.close,
       })),
-      asOf: rows[rows.length - 1]?.as_of || new Date().toISOString(),
+      asOf: rows[rows.length - 1]?.asOf || new Date().toISOString(),
       source: rows[rows.length - 1]?.source || 'Yahoo Finance (^NSEI / ^BSESN)',
     };
   }
 
   // --- Real Annual & Quarterly Financials ---
-  getFinancials(isin: string): { financials: FiveYearFinancial[]; asOf?: string; source?: string } {
-    const stmt = this.db.prepare(`
+  async getFinancials(isin: string): Promise<{ financials: FiveYearFinancial[]; asOf?: string; source?: string }> {
+    const rows: any[] = await prisma.$queryRawUnsafe(`
       SELECT f.*, r.pe_annual, r.pe_ttm, r.pb, r.roe, r.roce, r.debt_to_equity, r.interest_coverage, r.dividend_payout_pct
       FROM financials_annual f
       LEFT JOIN ratios r ON f.isin = r.isin AND f.period = r.period
-      WHERE f.isin = ?
+      WHERE f.isin = $1
       ORDER BY f.fiscal_year ASC
-    `);
+    `, isin);
 
-    const rows = stmt.all(isin) as any[];
     if (rows.length === 0) {
       return { financials: [] };
     }
@@ -468,21 +502,21 @@ export class DbService {
     const financials: FiveYearFinancial[] = rows.map((r) => ({
       period: r.period,
       year: r.fiscal_year,
-      revenueCr: r.revenue_cr ?? 0,
-      operatingProfitCr: r.op_profit_cr ?? 0,
-      operatingMarginPct: r.op_margin_pct ?? 0,
-      netProfitCr: r.net_profit_cr ?? 0,
-      eps: r.eps ?? 0,
-      totalDebtCr: r.total_debt_cr ?? 0,
-      netWorthCr: r.net_worth_cr ?? 0,
+      revenueCr: r.revenue_cr !== null ? Number(r.revenue_cr) : 0,
+      operatingProfitCr: r.op_profit_cr !== null ? Number(r.op_profit_cr) : 0,
+      operatingMarginPct: r.op_margin_pct !== null ? Number(r.op_margin_pct) : 0,
+      netProfitCr: r.net_profit_cr !== null ? Number(r.net_profit_cr) : 0,
+      eps: r.eps !== null ? Number(r.eps) : 0,
+      totalDebtCr: r.total_debt_cr !== null ? Number(r.total_debt_cr) : 0,
+      netWorthCr: r.net_worth_cr !== null ? Number(r.net_worth_cr) : 0,
       ratios: {
-        pe: r.pe_annual ?? r.pe_ttm ?? 0,
-        pb: r.pb ?? 0,
-        roe: r.roe ?? 0,
-        roce: r.roce ?? 0,
-        debtToEquity: r.debt_to_equity ?? 0,
-        interestCoverage: r.interest_coverage ?? 0,
-        dividendPayoutPct: r.dividend_payout_pct ?? 0,
+        pe: r.pe_annual !== null ? Number(r.pe_annual) : (r.pe_ttm !== null ? Number(r.pe_ttm) : 0),
+        pb: r.pb !== null ? Number(r.pb) : 0,
+        roe: r.roe !== null ? Number(r.roe) : 0,
+        roce: r.roce !== null ? Number(r.roce) : 0,
+        debtToEquity: r.debt_to_equity !== null ? Number(r.debt_to_equity) : 0,
+        interestCoverage: r.interest_coverage !== null ? Number(r.interest_coverage) : 0,
+        dividendPayoutPct: r.dividend_payout_pct !== null ? Number(r.dividend_payout_pct) : 0,
       },
     }));
 
@@ -493,51 +527,48 @@ export class DbService {
     };
   }
 
-  getQuarterlyFinancials(isin: string): any[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM financials_quarterly
-      WHERE isin = ?
-      ORDER BY period_end_date ASC
-    `);
-    return stmt.all(isin) as any[];
+  async getQuarterlyFinancials(isin: string): Promise<any[]> {
+    const rows = await prisma.financialsQuarterly.findMany({
+      where: { isin },
+      orderBy: { periodEndDate: 'asc' },
+    });
+    return rows;
   }
 
   // --- Real Shareholding Pattern ---
-  getShareholding(isin: string): { shareholding: ShareholdingQuarter[]; asOf?: string; source?: string } {
-    const stmt = this.db.prepare(`
-      SELECT * FROM shareholding
-      WHERE isin = ?
-      ORDER BY period_end_date ASC
-    `);
-    const rows = stmt.all(isin) as any[];
+  async getShareholding(isin: string): Promise<{ shareholding: ShareholdingQuarter[]; asOf?: string; source?: string }> {
+    const rows = await prisma.shareholding.findMany({
+      where: { isin },
+      orderBy: { periodEndDate: 'asc' },
+    });
+
     if (rows.length === 0) {
       return { shareholding: [] };
     }
 
     const shareholding: ShareholdingQuarter[] = rows.map((r) => ({
-      quarter: r.quarter_label,
+      quarter: r.quarterLabel,
       promoter: r.promoter ?? 0,
       fii: r.fii ?? 0,
       dii: r.dii ?? 0,
       public: r.public ?? 0,
-      pledgePct: r.pledge_pct ?? 0,
+      pledgePct: r.pledgePct ?? 0,
     }));
 
     return {
       shareholding,
-      asOf: rows[rows.length - 1]?.as_of || rows[rows.length - 1]?.period_end_date,
+      asOf: rows[rows.length - 1]?.asOf || rows[rows.length - 1]?.periodEndDate,
       source: rows[rows.length - 1]?.source || 'Exchange Shareholding Filings',
     };
   }
 
   // --- Real Corporate Actions ---
-  getCorporateActions(isin: string): { corporateActions: CorporateAction[]; asOf?: string; source?: string } {
-    const stmt = this.db.prepare(`
-      SELECT * FROM corporate_action
-      WHERE isin = ?
-      ORDER BY ex_date DESC
-    `);
-    const rows = stmt.all(isin) as any[];
+  async getCorporateActions(isin: string): Promise<{ corporateActions: CorporateAction[]; asOf?: string; source?: string }> {
+    const rows = await prisma.corporateAction.findMany({
+      where: { isin },
+      orderBy: { exDate: 'desc' },
+    });
+
     if (rows.length === 0) {
       return { corporateActions: [] };
     }
@@ -546,21 +577,21 @@ export class DbService {
       id: r.id,
       isin: r.isin,
       type: r.type as any,
-      exDate: r.ex_date,
-      ratioOrAmount: r.ratio_or_amount,
-      descriptionEn: r.description_en || `${r.type} ${r.ratio_or_amount}`,
-      descriptionMr: r.description_mr || `${r.type} ${r.ratio_or_amount}`,
+      exDate: r.exDate,
+      ratioOrAmount: r.ratioOrAmount,
+      descriptionEn: r.descriptionEn || `${r.type} ${r.ratioOrAmount}`,
+      descriptionMr: r.descriptionMr || `${r.type} ${r.ratioOrAmount}`,
     }));
 
     return {
       corporateActions,
-      asOf: rows[0]?.as_of || rows[0]?.ex_date,
+      asOf: rows[0]?.asOf || rows[0]?.exDate,
       source: rows[0]?.source || 'NSE/BSE Corporate Action Announcements',
     };
   }
 
   // --- Computed Real Trailing 12M Dividend Yield ---
-  computeTrailingDividendYield(isin: string, currentPrice: number): number | null {
+  async computeTrailingDividendYield(isin: string, currentPrice: number): Promise<number | null> {
     if (!currentPrice || currentPrice <= 0) return null;
 
     // Trailing 12 months from today
@@ -569,17 +600,20 @@ export class DbService {
     oneYearAgo.setFullYear(now.getFullYear() - 1);
     const oneYearAgoStr = oneYearAgo.toISOString().split('T')[0];
 
-    const stmt = this.db.prepare(`
-      SELECT ratio_or_amount FROM corporate_action
-      WHERE isin = ? AND type = 'DIVIDEND' AND ex_date >= ?
-    `);
-    const rows = stmt.all(isin, oneYearAgoStr) as any[];
+    const rows = await prisma.corporateAction.findMany({
+      where: {
+        isin,
+        type: 'DIVIDEND',
+        exDate: { gte: oneYearAgoStr },
+      },
+    });
+
     if (rows.length === 0) return null;
 
     let totalDps = 0;
     for (const r of rows) {
       // Parse numeric amount from e.g. "₹6.00 per share" or "5.5"
-      const match = r.ratio_or_amount.match(/([0-9]+(\.[0-9]+)?)/);
+      const match = r.ratioOrAmount.match(/([0-9]+(\.[0-9]+)?)/);
       if (match) {
         totalDps += parseFloat(match[1]);
       }
@@ -590,7 +624,7 @@ export class DbService {
   }
 
   // --- Sectors and Category Taxonomy ---
-  getAllSectors(): Array<{
+  async getAllSectors(): Promise<Array<{
     slug: string;
     nameEn: string;
     nameMr: string;
@@ -598,18 +632,18 @@ export class DbService {
     descriptionMr: string;
     companyCount: number;
     totalMarketCapCr: number;
-  }> {
-    const rows = this.db.prepare(`
+  }>> {
+    const rows: any[] = await prisma.$queryRawUnsafe(`
       SELECT s.slug, s.name_en, s.name_mr, s.description_en, s.description_mr,
-             COUNT(c.id) as company_count,
+             COUNT(c.id)::int as company_count,
              COALESCE(SUM(
                (COALESCE(c.shares_outstanding, 0) * COALESCE((SELECT ltp FROM price_live pl WHERE pl.isin = c.isin LIMIT 1), 0)) / 10000000.0
              ), 0) as total_mcap_cr
       FROM sector_taxonomy s
       LEFT JOIN company c ON s.slug = c.sector_slug
-      GROUP BY s.slug
+      GROUP BY s.slug, s.name_en, s.name_mr, s.description_en, s.description_mr
       ORDER BY total_mcap_cr DESC
-    `).all() as any[];
+    `);
 
     return rows.map((r) => ({
       slug: r.slug,
@@ -618,11 +652,11 @@ export class DbService {
       descriptionEn: r.description_en || '',
       descriptionMr: r.description_mr || '',
       companyCount: r.company_count || 0,
-      totalMarketCapCr: Number((r.total_mcap_cr || 0).toFixed(2)),
+      totalMarketCapCr: Number(Number(r.total_mcap_cr || 0).toFixed(2)),
     }));
   }
 
-  getSectorBySlug(slug: string): {
+  async getSectorBySlug(slug: string): Promise<{
     sector: {
       slug: string;
       nameEn: string;
@@ -637,8 +671,11 @@ export class DbService {
     averagePe: number | null;
     dayChangePct: number;
     companies: CompanyWithPrice[];
-  } {
-    const secRow = this.db.prepare(`SELECT * FROM sector_taxonomy WHERE slug = ?`).get(slug) as any;
+  }> {
+    const secRow = await prisma.sectorTaxonomy.findUnique({
+      where: { slug },
+    });
+
     if (!secRow) {
       return {
         sector: null,
@@ -650,7 +687,7 @@ export class DbService {
       };
     }
 
-    const { companies, total } = this.getCompanies({
+    const { companies, total } = await this.getCompanies({
       sector: slug,
       sortBy: 'marketCapDesc',
       pageSize: 200,
@@ -669,12 +706,12 @@ export class DbService {
     return {
       sector: {
         slug: secRow.slug,
-        nameEn: secRow.name_en,
-        nameMr: secRow.name_mr,
-        descriptionEn: secRow.description_en || '',
-        descriptionMr: secRow.description_mr || '',
-        aliasesEn: JSON.parse(secRow.aliases_en || '[]'),
-        aliasesMr: JSON.parse(secRow.aliases_mr || '[]'),
+        nameEn: secRow.nameEn,
+        nameMr: secRow.nameMr,
+        descriptionEn: secRow.descriptionEn || '',
+        descriptionMr: secRow.descriptionMr || '',
+        aliasesEn: JSON.parse(secRow.aliasesEn || '[]'),
+        aliasesMr: JSON.parse(secRow.aliasesMr || '[]'),
       },
       companyCount: total,
       totalMarketCapCr: Number(totalCap.toFixed(2)),
@@ -685,7 +722,7 @@ export class DbService {
   }
 
   // --- Autocomplete Global Search with Sector Taxonomy & Category Match ---
-  search(query: string, lang: 'en' | 'mr' = 'en'): any[] {
+  async search(query: string, lang: 'en' | 'mr' = 'en'): Promise<any[]> {
     if (!query || !query.trim()) return [];
     const rawQ = query.trim().toLowerCase();
     const qWildcard = `%${rawQ}%`;
@@ -694,33 +731,34 @@ export class DbService {
 
     // 1. Check Sector Taxonomy & Aliases First
     try {
-      const taxonomyRows = this.db.prepare(`SELECT * FROM sector_taxonomy`).all() as any[];
+      const taxonomyRows = await prisma.sectorTaxonomy.findMany();
       for (const s of taxonomyRows) {
-        const aliasesEn: string[] = JSON.parse(s.aliases_en || '[]');
-        const aliasesMr: string[] = JSON.parse(s.aliases_mr || '[]');
+        const aliasesEn: string[] = JSON.parse(s.aliasesEn || '[]');
+        const aliasesMr: string[] = JSON.parse(s.aliasesMr || '[]');
 
-        const matchesEn = s.slug.includes(rawQ) || s.name_en.toLowerCase().includes(rawQ) || aliasesEn.some((a) => a.toLowerCase().includes(rawQ) || rawQ.includes(a.toLowerCase()));
-        const matchesMr = s.name_mr.includes(query.trim()) || aliasesMr.some((a) => a.includes(query.trim()) || query.trim().includes(a));
+        const matchesEn = s.slug.includes(rawQ) || s.nameEn.toLowerCase().includes(rawQ) || aliasesEn.some((a) => a.toLowerCase().includes(rawQ) || rawQ.includes(a.toLowerCase()));
+        const matchesMr = s.nameMr.includes(query.trim()) || aliasesMr.some((a) => a.includes(query.trim()) || query.trim().includes(a));
 
         if (matchesEn || matchesMr) {
           // Get sector summary: count, top 3 companies, combined market cap
-          const topComps = this.db.prepare(`
+          const topComps: any[] = await prisma.$queryRawUnsafe(`
             SELECT c.name, c.name_mr, c.isin, c.shares_outstanding,
                    (SELECT ltp FROM price_live pl WHERE pl.isin = c.isin LIMIT 1) as ltp
             FROM company c
-            WHERE c.sector_slug = ?
+            WHERE c.sector_slug = $1
             ORDER BY (COALESCE(c.shares_outstanding, 0) * COALESCE((SELECT ltp FROM price_live pl WHERE pl.isin = c.isin LIMIT 1), 0)) DESC
             LIMIT 5
-          `).all(s.slug) as any[];
+          `, s.slug);
 
-          const countRow = this.db.prepare(`
-            SELECT COUNT(*) as count,
+          const countRows: any[] = await prisma.$queryRawUnsafe(`
+            SELECT COUNT(*)::int as count,
                    COALESCE(SUM((COALESCE(shares_outstanding, 0) * COALESCE((SELECT ltp FROM price_live pl WHERE pl.isin = company.isin LIMIT 1), 0)) / 10000000.0), 0) as total_mcap
             FROM company
-            WHERE sector_slug = ?
-          `).get(s.slug) as any;
+            WHERE sector_slug = $1
+          `, s.slug);
+          const countRow = countRows[0];
 
-          const totalMcap = Number((countRow?.total_mcap || 0).toFixed(0));
+          const totalMcap = Number(Number(countRow?.total_mcap || 0).toFixed(0));
           const top3En = topComps.slice(0, 3).map((c) => c.name.replace(/ Limited| Ltd\.?/i, '')).join(', ');
           const top3Mr = topComps.slice(0, 3).map((c) => (c.name_mr || c.name).replace(/ Limited| Ltd\.?/i, '')).join(', ');
 
@@ -728,8 +766,8 @@ export class DbService {
             type: 'SECTOR',
             id: s.slug,
             slug: s.slug,
-            name: s.name_en,
-            nameMr: s.name_mr,
+            name: s.nameEn,
+            nameMr: s.nameMr,
             subtitleEn: `${countRow?.count || 0} Companies · Total M-Cap: ₹${totalMcap.toLocaleString('en-IN')} Cr · Leaders: ${top3En}`,
             subtitleMr: `${countRow?.count || 0} कंपन्या · एकूण बाजार भांडवल: ₹${totalMcap.toLocaleString('en-IN')} कोटी · प्रमुख: ${top3Mr}`,
             url: `/sectors/${s.slug}`,
@@ -747,8 +785,8 @@ export class DbService {
               isin: c.isin,
               name: c.name,
               nameMr: c.name_mr || c.name,
-              subtitleEn: `${s.name_en} Leader · LTP: ₹${c.ltp || '—'}`,
-              subtitleMr: `${s.name_mr} अग्रगण्य कंपनी · किंमत: ₹${c.ltp || '—'}`,
+              subtitleEn: `${s.nameEn} Leader · LTP: ₹${c.ltp || '—'}`,
+              subtitleMr: `${s.nameMr} अग्रगण्य कंपनी · किंमत: ₹${c.ltp || '—'}`,
               url: `/company/${c.isin}`,
               badge: lang === 'mr' ? 'अग्रगण्य' : 'Leader',
             });
@@ -759,56 +797,60 @@ export class DbService {
     } catch (_) {}
 
     // 2. Search brands
-    const brandStmt = this.db.prepare(`
-      SELECT b.*, c.name as parent_name, c.name_mr as parent_name_mr
-      FROM brand b
-      LEFT JOIN company c ON b.parent_isin = c.isin
-      WHERE LOWER(b.name) LIKE ? OR LOWER(b.name_mr) LIKE ? OR LOWER(b.category) LIKE ?
-      LIMIT 4
-    `);
-    const brandRows = brandStmt.all(qWildcard, qWildcard, qWildcard) as any[];
-    for (const b of brandRows) {
-      results.push({
-        type: 'BRAND',
-        id: b.id,
-        isin: b.parent_isin,
-        name: b.name,
-        nameMr: b.name_mr || b.name,
-        subtitleEn: `Brand → Parent: ${b.parent_name || b.parent_company_id}`,
-        subtitleMr: `ब्रँड → मूळ कंपनी: ${b.parent_name_mr || b.parent_company_id}`,
-        url: `/brand/${b.id}`,
-        badge: b.category,
-      });
-    }
+    try {
+      const brandRows: any[] = await prisma.$queryRawUnsafe(`
+        SELECT b.*, c.name as parent_name, c.name_mr as parent_name_mr
+        FROM brand b
+        LEFT JOIN company c ON b.parent_isin = c.isin
+        WHERE b.name ILIKE $1 OR b.name_mr ILIKE $1 OR b.category ILIKE $1
+        LIMIT 4
+      `, qWildcard);
+
+      for (const b of brandRows) {
+        results.push({
+          type: 'BRAND',
+          id: b.id,
+          isin: b.parent_isin,
+          name: b.name,
+          nameMr: b.name_mr || b.name,
+          subtitleEn: `Brand → Parent: ${b.parent_name || b.parent_company_id}`,
+          subtitleMr: `ब्रँड → मूळ कंपनी: ${b.parent_name_mr || b.parent_company_id}`,
+          url: `/brand/${b.id}`,
+          badge: b.category,
+        });
+      }
+    } catch (_) {}
 
     // 3. Search companies
-    const compStmt = this.db.prepare(`
-      SELECT * FROM company
-      WHERE LOWER(name) LIKE ? OR LOWER(name_mr) LIKE ? OR LOWER(isin) LIKE ? OR LOWER(nse_symbol) LIKE ? OR bse_code LIKE ? OR LOWER(sector) LIKE ? OR LOWER(industry) LIKE ?
-      ORDER BY (COALESCE(shares_outstanding, 0) * COALESCE((SELECT ltp FROM price_live pl WHERE pl.isin = company.isin LIMIT 1), 0)) DESC
-      LIMIT 10
-    `);
-    const compRows = compStmt.all(qWildcard, qWildcard, qWildcard, qWildcard, qWildcard, qWildcard, qWildcard) as any[];
-    for (const c of compRows) {
-      // Avoid duplicate if already added by sector
-      if (results.some((r) => r.isin === c.isin)) continue;
+    try {
+      const compRows: any[] = await prisma.$queryRawUnsafe(`
+        SELECT * FROM company
+        WHERE name ILIKE $1 OR name_mr ILIKE $1 OR isin ILIKE $1 OR nse_symbol ILIKE $1 OR bse_code ILIKE $1 OR sector ILIKE $1 OR industry ILIKE $1
+        ORDER BY (COALESCE(shares_outstanding, 0) * COALESCE((SELECT ltp FROM price_live pl WHERE pl.isin = company.isin LIMIT 1), 0)) DESC
+        LIMIT 10
+      `, qWildcard);
 
-      const exchangeTags = [c.nse_symbol ? `NSE: ${c.nse_symbol}` : '', c.bse_code ? `BSE: ${c.bse_code}` : '']
-        .filter(Boolean)
-        .join(' | ');
+      for (const c of compRows) {
+        // Avoid duplicate if already added by sector
+        if (results.some((r) => r.isin === c.isin)) continue;
 
-      results.push({
-        type: 'COMPANY',
-        id: c.id,
-        isin: c.isin,
-        name: c.name,
-        nameMr: c.name_mr || c.name,
-        subtitleEn: `${c.sector} • ${exchangeTags}`,
-        subtitleMr: `${c.sector_mr || c.sector} • ${exchangeTags}`,
-        url: `/company/${c.isin}`,
-        badge: c.has_brands ? 'Has Brands' : undefined,
-      });
-    }
+        const exchangeTags = [c.nse_symbol ? `NSE: ${c.nse_symbol}` : '', c.bse_code ? `BSE: ${c.bse_code}` : '']
+          .filter(Boolean)
+          .join(' | ');
+
+        results.push({
+          type: 'COMPANY',
+          id: c.id,
+          isin: c.isin,
+          name: c.name,
+          nameMr: c.name_mr || c.name,
+          subtitleEn: `${c.sector} • ${exchangeTags}`,
+          subtitleMr: `${c.sector_mr || c.sector} • ${exchangeTags}`,
+          url: `/company/${c.isin}`,
+          badge: c.has_brands ? 'Has Brands' : undefined,
+        });
+      }
+    } catch (_) {}
 
     return results;
   }

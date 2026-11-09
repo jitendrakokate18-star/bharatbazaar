@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { dbService } from '@/lib/dbService';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ slug: string }> }
 ) {
   try {
     const { slug } = await params;
-    const data = dbService.getSectorBySlug(slug);
+    const data = await dbService.getSectorBySlug(slug);
     if (!data.sector) {
       return NextResponse.json({ error: 'Sector not found' }, { status: 404 });
     }

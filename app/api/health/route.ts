@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { prisma } from '@/lib/prisma';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,31 +12,38 @@ export async function GET() {
   let totalCompanies = 0;
   let totalQuotes = 0;
   let latestQuoteTime = '';
+  let dbError = '';
 
   try {
-    const db = getDb();
-    const compRow = db.prepare("SELECT count(*) as count FROM company WHERE status = 'ACTIVE'").get() as any;
-    totalCompanies = compRow ? compRow.count : 0;
+    totalCompanies = await prisma.company.count({
+      where: { status: 'ACTIVE' },
+    });
 
-    const quoteRow = db.prepare("SELECT count(*) as count, max(as_of) as latest FROM price_live").get() as any;
-    totalQuotes = quoteRow ? quoteRow.count : 0;
-    latestQuoteTime = quoteRow ? quoteRow.latest : '';
+    totalQuotes = await prisma.priceLive.count();
+    const latestQuote = await prisma.priceLive.aggregate({
+      _max: { asOf: true },
+    });
+    latestQuoteTime = latestQuote._max.asOf || '';
 
     dbHealthy = totalCompanies > 0;
   } catch (err) {
     console.error('Health DB error:', err);
     dbHealthy = false;
+    dbError = err instanceof Error ? err.message : String(err);
   }
 
   const responseBody = {
     status: dbHealthy ? 'OK' : 'DEGRADED',
     timestamp: new Date().toISOString(),
     uptimeSeconds,
+    nodeVersion: process.version,
     database: {
+      type: 'PostgreSQL (Neon)',
       healthy: dbHealthy,
       activeCompanies: totalCompanies,
       liveQuotesCached: totalQuotes,
       latestQuoteTime,
+      error: dbError || undefined,
     },
     version: '1.0.0',
     environment: process.env.NODE_ENV || 'production',

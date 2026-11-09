@@ -20,8 +20,11 @@ yarn-debug.log*
 yarn-error.log*
 
 # local env files
-.env*.local
+.env*
 
-# SQLite temporary WAL/SHM files
+# SQLite files
+market.db
 market.db-wal
 market.db-shm
+
+.vercel

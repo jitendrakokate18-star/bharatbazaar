@@ -1,9 +1,7 @@
-import { getDb } from '../lib/db.ts';
+import { prisma } from '../lib/prisma.ts';
 import { getMarketStatus } from '../lib/dates.ts';
 import { ingestUniverseQuotes } from './ingestUniverseQuotes.ts';
 import { ingestIndices } from './ingestIndices.ts';
-
-const db = getDb();
 
 async function runWorkerIteration() {
   const istStatus = getMarketStatus();
@@ -11,34 +9,28 @@ async function runWorkerIteration() {
 
   try {
     // 1. Ingest/refresh benchmark index quotes (^NSEI, ^BSESN, ^NSEBANK, ^CNXIT)
-    await ingestIndices();
+    await ingestIndices(false); // only quotes in fast loop
 
-    // 2. Check and process any on-demand hydration jobs
-    const pendingJobs = db.prepare(`
-      SELECT * FROM ingestion_job_queue WHERE status = 'PENDING' ORDER BY priority ASC LIMIT 10
-    `).all() as any[];
-
-    if (pendingJobs.length > 0) {
-      console.log(`Processing ${pendingJobs.length} on-demand priority queue items...`);
-      for (const job of pendingJobs) {
-        db.prepare(`UPDATE ingestion_job_queue SET status = 'COMPLETED', updated_at = ? WHERE id = ?`)
-          .run(new Date().toISOString(), job.id);
-      }
-    }
-
-    // 3. Ingest/refresh universe quotes (BSE + NSE Bhavcopies + Fallback pool)
+    // 2. Ingest/refresh universe quotes (BSE + NSE Bhavcopies + Fallback pool)
     await ingestUniverseQuotes();
 
-    // 4. Update data freshness table
+    // 3. Update data freshness table
     const nowIso = new Date().toISOString();
-    db.prepare(`
-      INSERT INTO data_freshness (dataset, latest_as_of, last_successful_run, record_count, status)
-      VALUES ('worker_heartbeat', ?, ?, 1, 'OK')
-      ON CONFLICT(dataset) DO UPDATE SET
-        latest_as_of = excluded.latest_as_of,
-        last_successful_run = excluded.last_successful_run,
-        status = 'OK'
-    `).run(nowIso.split('T')[0], nowIso);
+    await prisma.dataFreshness.upsert({
+      where: { dataset: 'worker_heartbeat' },
+      create: {
+        dataset: 'worker_heartbeat',
+        latestAsOf: nowIso.split('T')[0],
+        lastSuccessfulRun: nowIso,
+        recordCount: 1,
+        status: 'OK',
+      },
+      update: {
+        latestAsOf: nowIso.split('T')[0],
+        lastSuccessfulRun: nowIso,
+        status: 'OK',
+      },
+    });
 
     console.log(`[${new Date().toISOString()}] LiveQuoteWorker iteration completed successfully.`);
   } catch (err: any) {
@@ -60,6 +52,6 @@ async function main() {
   }
 }
 
-if (process.argv[1]?.endsWith('worker.ts')) {
+if (process.argv[1]?.endsWith('worker.ts') || process.argv[1]?.endsWith('worker.js')) {
   main().catch(console.error);
 }
